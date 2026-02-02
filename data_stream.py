@@ -1,56 +1,45 @@
+"""
 data_stream.py
 
-Databento live data streaming for centralized currency futures
+Databento live futures trade stream
+Yields normalized tick data for the footprint engine
+"""
 
-import threading import databento as db from datetime import datetime from config import DATASET, SCHEMA, FUTURES_SYMBOLS from state import RuntimeState
+import os
+import databento as db
 
-class DataStreamer: def init(self, api_key: str, symbol_key: str, state: RuntimeState): """ symbol_key: one of '6E', '6J', '6A' state: shared RuntimeState instance """ if symbol_key not in FUTURES_SYMBOLS: raise ValueError(f"Unsupported symbol {symbol_key}")
 
-self.symbol = FUTURES_SYMBOLS[symbol_key]
-    self.state = state
-    self.client = db.Live(key=api_key)
-    self._thread = None
-    self._running = False
+def start_stream(symbol: str):
+    """
+    Generator yielding normalized trade ticks:
+    {
+        price: float
+        size: int
+        side: 'BID' or 'ASK'
+        ts: float (epoch seconds)
+    }
+    """
 
-def start(self):
-    if self._running:
-        return
-    self._running = True
-    self._thread = threading.Thread(target=self._run, daemon=True)
-    self._thread.start()
+    api_key = os.environ.get("db-4mdvTcWe8iqmvSRFC8534wrTiCqaq")
+    if not api_key:
+        raise RuntimeError("DATABENTO_API_KEY not set")
 
-def stop(self):
-    self._running = False
+    client = db.Live(api_key)
 
-def _run(self):
-    self.client.subscribe(
-        dataset=DATASET,
-        schema=SCHEMA,
-        symbols=[self.symbol],
+    # CME Globex trades (centralized)
+    client.subscribe(
+        dataset="GLBX.MDP3",
+        schema="trades",
+        symbols=[symbol],
     )
 
-    for msg in self.client:
-        if not self._running:
-            break
-
-        # Only process trade messages
-        try:
-            ts = msg.ts_event
-            price = msg.price
-            size = msg.size
-            side = msg.side  # BUY or SELL
-        except AttributeError:
+    for msg in client:
+        if msg.schema != "trades":
             continue
 
-        # Normalize timestamp to seconds
-        ts_sec = ts // 1_000_000_000
-
-        self.state.ingest_trade(
-            timestamp=ts_sec,
-            price=price,
-            size=size,
-            side=side,
-        )
-
-def is_running(self) -> bool:
-    return self._running
+        yield {
+            "price": float(msg.price),
+            "size": int(msg.size),
+            "side": "ASK" if msg.is_buyer_maker is False else "BID",
+            "ts": msg.ts_event / 1_000_000_000,
+    }

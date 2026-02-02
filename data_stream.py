@@ -20,7 +20,7 @@ def start_stream(symbol: str):
     }
     """
 
-    api_key = os.environ.get("db-4mdvTcWe8iqmvSRFC8534wrTiCqaq")
+    api_key = os.environ.get("DATABENTO_API_KEY")
     if not api_key:
         raise RuntimeError("DATABENTO_API_KEY not set")
 

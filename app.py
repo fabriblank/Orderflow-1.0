@@ -87,4 +87,4 @@ else:
 # ---------------- Heartbeat ----------------
 
 time.sleep(1)
-st.experimental_rerun()
+st.rerun()

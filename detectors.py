@@ -1,104 +1,136 @@
+"""
 detectors.py
 
-Advanced order-flow detectors: imbalances, stacked imbalances, unfinished business
+Order-flow detection logic:
+- Bid/Ask imbalances (1:300)
+- Stacked imbalances (3+)
+- Unfinished business (failed auctions)
+"""
 
-from typing import Dict, List, Tuple from config import ( IMBALANCE_RATIO, STACKED_IMBALANCE_MIN, )
+IMBALANCE_RATIO = 300
+STACKED_COUNT = 3
 
-class Imbalance: def init(self, price: float, side: str): self.price = price self.side = side  # 'ASK' or 'BID'
 
-class StackedImbalanceZone: def init(self, prices: List[float], side: str): self.prices = prices self.side = side  # 'ASK' or 'BID' self.active = True
+def detect_imbalances(bars):
+    """
+    Detect bid/ask imbalances per footprint bar.
+    Returns list of:
+    {
+        bar: int,
+        price: float,
+        side: 'ASK' | 'BID'
+    }
+    """
+    imbalances = []
 
-def contains(self, price: float) -> bool:
-    return min(self.prices) <= price <= max(self.prices)
+    for bar_index, bar in enumerate(bars):
+        for price, lvl in bar.levels.items():
+            bid = lvl["bid"]
+            ask = lvl["ask"]
 
-class UnfinishedBusiness: def init(self, price: float, side: str): self.price = price self.side = side  # 'ASK' for unfinished high, 'BID' for unfinished low self.active = True
+            if bid > 0 and ask / bid >= IMBALANCE_RATIO:
+                imbalances.append(
+                    {"bar": bar_index, "price": price, "side": "ASK"}
+                )
 
------------------------------
+            elif ask > 0 and bid / ask >= IMBALANCE_RATIO:
+                imbalances.append(
+                    {"bar": bar_index, "price": price, "side": "BID"}
+                )
 
-IMBALANCE DETECTION
+    return imbalances
 
------------------------------
 
-def detect_imbalances(levels: Dict[float, Dict[str, int]]) -> List[Imbalance]: imbalances = []
+def detect_stacked_imbalances(imbalances):
+    """
+    Detect stacked imbalances (3+ consecutive price levels).
+    Returns list of zones:
+    {
+        start_bar, end_bar, low, high, side
+    }
+    """
+    zones = []
+    if not imbalances:
+        return zones
 
-for price, vols in levels.items():
-    bid = vols.get("bid", 0)
-    ask = vols.get("ask", 0)
+    imbalances = sorted(
+        imbalances, key=lambda x: (x["bar"], x["side"], x["price"])
+    )
 
-    if bid == 0 and ask == 0:
-        continue
+    current = [imbalances[0]]
 
-    # ask imbalance
-    if bid > 0 and ask / bid >= IMBALANCE_RATIO:
-        imbalances.append(Imbalance(price, "ASK"))
+    for imb in imbalances[1:]:
+        last = current[-1]
 
-    # bid imbalance
-    if ask > 0 and bid / ask >= IMBALANCE_RATIO:
-        imbalances.append(Imbalance(price, "BID"))
+        if (
+            imb["bar"] == last["bar"]
+            and imb["side"] == last["side"]
+            and abs(imb["price"] - last["price"]) < 1e-9
+        ):
+            current.append(imb)
+        else:
+            if len(current) >= STACKED_COUNT:
+                prices = [x["price"] for x in current]
+                zones.append(
+                    {
+                        "start_bar": current[0]["bar"],
+                        "end_bar": current[-1]["bar"] + 1,
+                        "low": min(prices),
+                        "high": max(prices),
+                        "side": current[0]["side"],
+                    }
+                )
+            current = [imb]
 
-return imbalances
+    if len(current) >= STACKED_COUNT:
+        prices = [x["price"] for x in current]
+        zones.append(
+            {
+                "start_bar": current[0]["bar"],
+                "end_bar": current[-1]["bar"] + 1,
+                "low": min(prices),
+                "high": max(prices),
+                "side": current[0]["side"],
+            }
+        )
 
------------------------------
-
-STACKED IMBALANCES
-
------------------------------
-
-def detect_stacked_imbalances(imbalances: List[Imbalance]) -> List[StackedImbalanceZone]: zones: List[StackedImbalanceZone] = []
-
-if not imbalances:
     return zones
 
-# group by side
-by_side: Dict[str, List[float]] = {"ASK": [], "BID": []}
-for imb in imbalances:
-    by_side[imb.side].append(imb.price)
 
-for side, prices in by_side.items():
-    if len(prices) < STACKED_IMBALANCE_MIN:
-        continue
+def detect_unfinished_business(bars):
+    """
+    Detect unfinished auctions:
+    - High with no bid
+    - Low with no ask
+    """
+    unfinished = []
 
-    prices = sorted(prices)
-    stack = [prices[0]]
+    for i, bar in enumerate(bars):
+        if not bar.levels:
+            continue
 
-    for p in prices[1:]:
-        # consecutive price levels
-        if abs(p - stack[-1]) <= 1e-9 or abs(p - stack[-1]) <= 0.25:
-            stack.append(p)
-        else:
-            if len(stack) >= STACKED_IMBALANCE_MIN:
-                zones.append(StackedImbalanceZone(stack.copy(), side))
-            stack = [p]
+        prices = sorted(bar.levels.keys())
+        low = prices[0]
+        high = prices[-1]
 
-    if len(stack) >= STACKED_IMBALANCE_MIN:
-        zones.append(StackedImbalanceZone(stack.copy(), side))
+        if bar.levels[high]["bid"] == 0:
+            unfinished.append(
+                {
+                    "price": high,
+                    "side": "ASK",
+                    "start_bar": i,
+                    "end_bar": i + 1,
+                }
+            )
 
-return zones
+        if bar.levels[low]["ask"] == 0:
+            unfinished.append(
+                {
+                    "price": low,
+                    "side": "BID",
+                    "start_bar": i,
+                    "end_bar": i + 1,
+                }
+            )
 
------------------------------
-
-UNFINISHED BUSINESS (FAILED AUCTION)
-
------------------------------
-
-def detect_unfinished_business(levels: Dict[float, Dict[str, int]]) -> List[UnfinishedBusiness]: results: List[UnfinishedBusiness] = []
-
-if not levels:
-    return results
-
-prices = sorted(levels.keys())
-low = prices[-1]
-high = prices[0]
-
-low_vols = levels[low]
-high_vols = levels[high]
-
-# unfinished low: only bid traded
-if low_vols.get("ask", 0) == 0 and low_vols.get("bid", 0) > 0:
-    results.append(UnfinishedBusiness(low, "BID"))
-
-# unfinished high: only ask traded
-if high_vols.get("bid", 0) == 0 and high_vols.get("ask", 0) > 0:
-    results.append(UnfinishedBusiness(high, "ASK"))
-
-return results
+    return unfinished
